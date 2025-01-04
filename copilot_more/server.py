@@ -18,8 +18,10 @@ app.add_middleware(
 )
 
 
-API_URL = "https://api.individual.githubcopilot.com/chat/completions"
+CHAT_COMPLETIONS_API_ENDPOINT = "https://api.individual.githubcopilot.com/chat/completions"
+MODELS_API_ENDPOINT = "https://api.individual.githubcopilot.com/models"
 TIMEOUT = ClientTimeout(total=300)
+MAX_TOKENS = 10240
 
 def preprocess_request_body(request_body: dict) -> dict:
     """
@@ -51,9 +53,11 @@ def preprocess_request_body(request_body: dict) -> dict:
             if message["role"] == "system":
                 message["role"] = "user"
 
+    max_tokens = request_body.get("max_tokens", MAX_TOKENS)
     return {
         **request_body,
-        "messages": processed_messages
+        "messages": processed_messages,
+        "max_tokens": max_tokens
     }
 
 # o1 models only support non-streaming responses, we need to convert them to standard streaming format
@@ -96,6 +100,34 @@ def convert_to_sse_events(data: dict) -> list[str]:
     events.append("data: [DONE]\n\n")
     return events
 
+@app.get("/models")
+async def list_models():
+    """
+    Proxies models request.
+    """
+    try:
+        token = await get_cached_copilot_token()
+        async with ClientSession(timeout=TIMEOUT) as session:
+            async with session.get(
+                MODELS_API_ENDPOINT,
+                headers={
+                    "Authorization": f"Bearer {token['token']}",
+                    "Content-Type": "application/json",
+                    "editor-version": "vscode/1.95.3"
+                },
+            ) as response:
+                if response.status != 200:
+                    error_message = await response.text()
+                    logger.error(f"Models API error: {error_message}")
+                    raise HTTPException(
+                        response.status,
+                        f"Models API error: {error_message}"
+                    )
+                return await response.json()
+    except Exception as e:
+        logger.error(f"Error fetching models: {str(e)}")
+        raise HTTPException(500, f"Error fetching models: {str(e)}")
+
 @app.post("/chat/completions")
 async def proxy_chat_completions(request: Request):
     """
@@ -120,7 +152,7 @@ async def proxy_chat_completions(request: Request):
 
             async with ClientSession(timeout=TIMEOUT) as session:
                 async with session.post(
-                    API_URL,
+                    CHAT_COMPLETIONS_API_ENDPOINT,
                     json=request_body,
                     headers={
                         "Authorization": f"Bearer {token['token']}",
